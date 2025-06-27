@@ -2,11 +2,14 @@ import os
 import logging
 from typing import TypedDict, Dict, Any
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # ------------------------
 # ✅ Setup logging
@@ -104,6 +107,11 @@ def build_chat_graph():
         raise
 
 # ------------------------
+# ✅ Initialize rate limiter
+# ------------------------
+limiter = Limiter(key_func=get_remote_address)
+
+# ------------------------
 # ✅ FastAPI app setup
 # ------------------------
 app = FastAPI(
@@ -112,12 +120,18 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configure CORS
+# Add rate limiter to app state
+app.state.limiter = limiter
+
+# Add rate limit exception handler
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Configure CORS - ONLY allow your frontend URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production
+    allow_origins=["https://chatbot-frontend-gamma-one.vercel.app"],  # Only your frontend
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],  # Only allow necessary methods
     allow_headers=["*"],
 )
 
@@ -136,11 +150,12 @@ async def startup_event():
 # ✅ Chat endpoint
 # ------------------------
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+@limiter.limit("15/minute")  # 15 requests per minute per IP
+async def chat_endpoint(request: Request, chat_request: ChatRequest):
     """Handle chat requests and return AI responses."""
     try:
         result = app.state.chatbot.invoke({
-            "input": request.message,
+            "input": chat_request.message,
             "metadata": {},  # Initialize empty metadata
             "output": ""  # Initialize empty output
         })
